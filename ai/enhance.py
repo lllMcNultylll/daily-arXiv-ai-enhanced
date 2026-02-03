@@ -163,7 +163,8 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
     # for v in item.get("AI", {}).values():
     #     if is_sensitive(str(v)):
     #         return None
-    # return item
+
+    return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
