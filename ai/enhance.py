@@ -160,10 +160,10 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
             item['AI'][field] = default_ai_fields[field]
 
     # 检查 AI 生成的所有字段
-    for v in item.get("AI", {}).values():
-        if is_sensitive(str(v)):
-            return None
-    return item
+    # for v in item.get("AI", {}).values():
+    #     if is_sensitive(str(v)):
+    #         return None
+    # return item
 
 def process_all_items(data: List[Dict], model_name: str, language: str, max_workers: int) -> List[Dict]:
     """并行处理所有数据项"""
