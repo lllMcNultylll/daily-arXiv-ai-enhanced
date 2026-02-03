@@ -106,8 +106,8 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
         return code_info
 
     # 检查 summary 字段
-    if is_sensitive(item.get("summary", "")):
-        return None
+    # if is_sensitive(item.get("summary", "")):
+    #     return None
 
     # 检测代码可用性
     code_info = check_github_code(item.get("summary", ""))
