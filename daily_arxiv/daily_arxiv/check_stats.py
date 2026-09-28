@@ -11,7 +11,11 @@
 import json
 import sys
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
 
 def load_papers_data(file_path):
     """
@@ -69,29 +73,39 @@ def perform_deduplication():
         str: 去重状态 / Deduplication status
              - "has_new_content": 有新内容 / Has new content
              - "no_new_content": 无新内容 / No new content  
-             - "no_data": 无数据 / No data
+             - "no_papers_found": 当天列表页无论文 / No papers found on listing pages
+             - "crawl_failure": 爬取失败 / Crawling failure
              - "error": 处理错误 / Processing error
     """
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    crawl_list_discovered = int(os.environ.get("CRAWL_LIST_DISCOVERED", "-1"))
+    crawl_detail_success = int(os.environ.get("CRAWL_DETAIL_SUCCESS", "-1"))
+    crawl_detail_failed = int(os.environ.get("CRAWL_DETAIL_FAILED", "-1"))
+
+    if crawl_list_discovered == 0 and crawl_detail_success == 0 and crawl_detail_failed == 0:
+        print("今日列表页未发现论文 / No papers found on listing pages today", file=sys.stderr)
+        return "no_papers_found"
+
+    today = utc_now().strftime("%Y-%m-%d")
     today_file = f"../data/{today}.jsonl"
     history_days = 7  # 向前追溯几天的数据进行对比
 
     if not os.path.exists(today_file):
         print("今日数据文件不存在 / Today's data file does not exist", file=sys.stderr)
-        return "no_data"
+        return "crawl_failure"
 
     try:
         today_papers, today_ids = load_papers_data(today_file)
         print(f"今日论文总数: {len(today_papers)} / Today's total papers: {len(today_papers)}", file=sys.stderr)
 
         if not today_papers:
-            return "no_data"
+            return "crawl_failure"
 
         # 收集历史多日 ID 集合
         history_ids = set()
+        now = utc_now()
         for i in range(1, history_days + 1):
-            date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            date_str = (now - timedelta(days=i)).strftime("%Y-%m-%d")
             history_file = f"../data/{date_str}.jsonl"
             _, past_ids = load_papers_data(history_file)
             history_ids.update(past_ids)
@@ -135,8 +149,9 @@ def main():
     
     退出码含义 / Exit code meanings:
     0: 有新内容，继续处理 / Has new content, continue processing
-    1: 无新内容，停止工作流 / No new content, stop workflow
-    2: 处理错误 / Processing error
+    1: 无新内容，停止后续处理 / No new content, stop downstream processing
+    2: 爬取失败或处理错误 / Crawling failure or processing error
+    3: 当天无论文 / No papers found today
     """
     
     print("正在执行去重检查... / Performing intelligent deduplication check...", file=sys.stderr)
@@ -150,9 +165,12 @@ def main():
     elif dedup_status == "no_new_content":
         print("⏹️ 去重完成，无新内容，停止工作流 / Deduplication completed, no new content, stop workflow", file=sys.stderr)
         sys.exit(1)
-    elif dedup_status == "no_data":
-        print("⏹️ 今日无数据，停止工作流 / No data today, stop workflow", file=sys.stderr)
-        sys.exit(1)
+    elif dedup_status == "no_papers_found":
+        print("⏹️ 今日列表页无论文，停止后续处理 / No papers found today, stop downstream processing", file=sys.stderr)
+        sys.exit(3)
+    elif dedup_status == "crawl_failure":
+        print("❌ 爬取失败或数据为空，停止工作流 / Crawling failed or data file empty, stop workflow", file=sys.stderr)
+        sys.exit(2)
     elif dedup_status == "error":
         print("❌ 去重处理出错，停止工作流 / Deduplication processing error, stop workflow", file=sys.stderr)
         sys.exit(2)

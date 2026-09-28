@@ -97,6 +97,10 @@ case $dedup_exit_code in
         # check_stats.py已输出错误信息，停止处理 / check_stats.py already output error info, stop processing
         exit 2
         ;;
+    3)
+        # check_stats.py已输出当日无论文信息，停止处理 / check_stats.py already output no papers found info, stop processing
+        exit 1
+        ;;
     *)
         echo "❌ 未知退出码，停止处理... / Unknown exit code, stopping..."
         exit 1

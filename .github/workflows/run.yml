@@ -24,8 +24,10 @@ jobs:
     - name: Crawl arXiv papers
       id: crawl_step
       run: |
+        set -euo pipefail
         source .venv/bin/activate
         today=$(date -u "+%Y-%m-%d")
+        stats_file="../data/${today}_crawl_stats.json"
         echo "开始爬取 $today 的arXiv论文... / Starting to crawl $today arXiv papers..."
         
         # 检查今日文件是否已存在，如存在则删除 / Check if today's file exists, delete if found
@@ -44,17 +46,51 @@ jobs:
         export LANGUAGE="${{ vars.LANGUAGE }}"
         export CATEGORIES="${{ vars.CATEGORIES }}"
         export MODEL_NAME="${{ vars.MODEL_NAME }}"
+        export CRAWL_STATS_FILE="$stats_file"
+        export SCRAPY_USER_AGENT="daily-arXiv-ai-enhanced/1.0 (+https://github.com/${{ github.repository }})"
         
         # 使用Scrapy爬取
         # Use Scrapy to crawl
-        scrapy crawl arxiv -o ../data/${today}.jsonl
+        scrapy crawl arxiv -o ../data/${today}.jsonl 2>&1 | tee /tmp/crawl.log
         
         # 检查爬取是否成功 / Check if crawling was successful
         if [ ! -f "../data/${today}.jsonl" ]; then
             echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
             exit 1
         fi
-        
+
+        set +e
+        crawl_health_output=$(python daily_arxiv/check_crawl_health.py --stats-file "$stats_file" --data-file "../data/${today}.jsonl")
+        crawl_health_exit_code=$?
+        set -e
+        echo "$crawl_health_output"
+
+        while IFS='=' read -r key value; do
+          case "$key" in
+            crawl_health|list_discovered|detail_success|detail_failed|log_count_error)
+              echo "$key=$value" >> $GITHUB_OUTPUT
+              ;;
+          esac
+        done <<< "$crawl_health_output"
+
+        echo "crawl_health_exit_code=$crawl_health_exit_code" >> $GITHUB_OUTPUT
+
+        case $crawl_health_exit_code in
+          0)
+            echo "crawl_partial_failures=false" >> $GITHUB_OUTPUT
+            ;;
+          1)
+            echo "crawl_partial_failures=true" >> $GITHUB_OUTPUT
+            ;;
+          3)
+            echo "crawl_partial_failures=false" >> $GITHUB_OUTPUT
+            ;;
+          *)
+            echo "❌ 爬取健康检查失败，终止工作流 / Crawl health check failed, stop workflow"
+            exit 1
+            ;;
+        esac
+         
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
         echo "爬取完成 / Crawling completed"
         
@@ -65,7 +101,18 @@ jobs:
         echo "执行去重检查... / Performing intelligent deduplication check..."
         
         cd daily_arxiv
+        if [ "${{ steps.crawl_step.outputs.crawl_health }}" = "no_papers_found" ]; then
+          echo "has_new_content=false" >> $GITHUB_OUTPUT
+          echo "skip_reason=no_papers_found" >> $GITHUB_OUTPUT
+          echo "dedup_exit_code=3" >> $GITHUB_OUTPUT
+          echo "今日列表页无论文，跳过去重与后续步骤 / No papers found today, skip dedup and downstream steps"
+          exit 0
+        fi
+
         # 执行去重检查脚本 / Execute intelligent deduplication check script
+        export CRAWL_LIST_DISCOVERED="${{ steps.crawl_step.outputs.list_discovered }}"
+        export CRAWL_DETAIL_SUCCESS="${{ steps.crawl_step.outputs.detail_success }}"
+        export CRAWL_DETAIL_FAILED="${{ steps.crawl_step.outputs.detail_failed }}"
         set +e  # 暂时允许命令失败 / Temporarily allow command failure
         python daily_arxiv/check_stats.py
         
@@ -84,9 +131,13 @@ jobs:
                 echo "has_new_content=false" >> $GITHUB_OUTPUT
                 echo "skip_reason=no_new_content" >> $GITHUB_OUTPUT
                 ;;
+            3)
+                echo "has_new_content=false" >> $GITHUB_OUTPUT
+                echo "skip_reason=no_papers_found" >> $GITHUB_OUTPUT
+                ;;
             2)
                 echo "has_new_content=false" >> $GITHUB_OUTPUT
-                echo "skip_reason=processing_error" >> $GITHUB_OUTPUT
+                echo "skip_reason=crawl_or_processing_error" >> $GITHUB_OUTPUT
                 exit 1
                 ;;
             *)
@@ -200,8 +251,11 @@ jobs:
             "no_new_content")
               echo "ℹ️ 工作流完成：去重后无新内容 / Workflow completed: No new content after smart deduplication"
               ;;
-            "processing_error")
-              echo "⚠️ 工作流完成：去重处理出错 / Workflow completed: Deduplication processing error"
+            "no_papers_found")
+              echo "ℹ️ 工作流完成：今日列表页无论文 / Workflow completed: No papers found on listing pages today"
+              ;;
+            "crawl_or_processing_error")
+              echo "⚠️ 工作流完成：爬取或去重处理出错 / Workflow completed: Crawl or dedup processing error"
               ;;
             "unknown_error")
               echo "⚠️ 工作流完成：未知错误 / Workflow completed: Unknown error"
@@ -210,6 +264,9 @@ jobs:
               echo "ℹ️ 工作流完成：未知原因跳过处理 / Workflow completed: Skipped for unknown reason"
               ;;
           esac
+        fi
+        if [ "${{ steps.crawl_step.outputs.crawl_partial_failures }}" = "true" ]; then
+          echo "⚠️ 爬取存在部分详情失败：list_discovered=${{ steps.crawl_step.outputs.list_discovered }}, detail_success=${{ steps.crawl_step.outputs.detail_success }}, detail_failed=${{ steps.crawl_step.outputs.detail_failed }}"
         fi
         
     - name: Inject repository info into data-config.js
