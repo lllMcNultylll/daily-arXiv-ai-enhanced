@@ -4,29 +4,13 @@
 # See: https://docs.scrapy.org/en/latest/topics/item-pipeline.html
 
 
-# useful for handling different item types with a single interface
-import arxiv
-import json
-import os
-import sys
-from datetime import datetime, timedelta
-
-
 class DailyArxivPipeline:
-    def __init__(self):
-        self.page_size = 100
-        self.client = arxiv.Client(self.page_size)
-
     def process_item(self, item: dict, spider):
-        item["pdf"] = f"https://arxiv.org/pdf/{item['id']}"
-        item["abs"] = f"https://arxiv.org/abs/{item['id']}"
-        search = arxiv.Search(
-            id_list=[item["id"]],
-        )
-        paper = next(self.client.results(search))
-        item["authors"] = [a.name for a in paper.authors]
-        item["title"] = paper.title
-        item["categories"] = paper.categories
-        item["comment"] = paper.comment
-        item["summary"] = paper.summary
+        item["pdf"] = item.get("pdf") or f"https://arxiv.org/pdf/{item['id']}"
+        item["abs"] = item.get("abs") or f"https://arxiv.org/abs/{item['id']}"
+        item["authors"] = item.get("authors", [])
+        item["title"] = item.get("title", "")
+        item["categories"] = item.get("categories", [])
+        item["comment"] = item.get("comment")
+        item["summary"] = item.get("summary", "")
         return item

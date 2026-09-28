@@ -1,6 +1,7 @@
 import scrapy
 import os
 import re
+import json
 
 
 class ArxivSpider(scrapy.Spider):
@@ -61,17 +62,119 @@ class ArxivSpider(scrapy.Spider):
                 # 检查论文分类是否与目标分类有交集
                 paper_categories = set(categories_in_paper)
                 if paper_categories.intersection(self.target_categories):
-                    yield {
-                        "id": arxiv_id,
-                        "categories": list(paper_categories),  # 添加分类信息用于调试
-                    }
+                    self.crawler.stats.inc_value("arxiv/list_discovered", 1)
                     self.logger.info(f"Found paper {arxiv_id} with categories {paper_categories}")
+                    yield response.follow(
+                        abstract_link,
+                        callback=self.parse_detail,
+                        meta={
+                            "arxiv_id": arxiv_id,
+                            "categories": list(paper_categories),
+                            "handle_httpstatus_list": [406, 429],
+                        },
+                    )
                 else:
                     self.logger.debug(f"Skipped paper {arxiv_id} with categories {paper_categories} (not in target {self.target_categories})")
             else:
                 # 如果无法获取分类信息，记录警告但仍然返回论文（保持向后兼容）
                 self.logger.warning(f"Could not extract categories for paper {arxiv_id}, including anyway")
-                yield {
-                    "id": arxiv_id,
-                    "categories": [],
-                }
+                self.crawler.stats.inc_value("arxiv/list_discovered", 1)
+                yield response.follow(
+                    abstract_link,
+                    callback=self.parse_detail,
+                    meta={
+                        "arxiv_id": arxiv_id,
+                        "categories": [],
+                        "handle_httpstatus_list": [406, 429],
+                    },
+                )
+
+    def parse_detail(self, response):
+        arxiv_id = response.meta["arxiv_id"]
+        categories = response.meta.get("categories", [])
+
+        if response.status in (406, 429):
+            self.crawler.stats.inc_value("arxiv/detail_failed", 1)
+            self.logger.error(
+                "Detail fetch failed for %s with HTTP %s after retries. URL: %s",
+                arxiv_id,
+                response.status,
+                response.url,
+            )
+            return
+
+        if response.status != 200:
+            self.crawler.stats.inc_value("arxiv/detail_failed", 1)
+            self.logger.error(
+                "Detail fetch failed for %s with unexpected HTTP %s. URL: %s",
+                arxiv_id,
+                response.status,
+                response.url,
+            )
+            return
+
+        title_parts = response.css("h1.title *::text, h1.title::text").getall()
+        title = " ".join(part.strip() for part in title_parts if part.strip())
+        title = re.sub(r"^Title:\s*", "", title).strip()
+
+        authors = [a.strip() for a in response.css("div.authors a::text").getall() if a.strip()]
+
+        summary_parts = response.css("blockquote.abstract *::text, blockquote.abstract::text").getall()
+        summary = " ".join(part.strip() for part in summary_parts if part.strip())
+        summary = re.sub(r"^Abstract:\s*", "", summary).strip()
+
+        comment_parts = response.css("td.tablecell.comments *::text, td.tablecell.comments::text").getall()
+        comment = " ".join(part.strip() for part in comment_parts if part.strip())
+        comment = comment if comment else None
+
+        if not categories:
+            subjects_text = " ".join(
+                part.strip() for part in response.css("td.tablecell.subjects *::text, td.tablecell.subjects::text").getall() if part.strip()
+            )
+            categories = re.findall(r"\(([^)]+)\)", subjects_text)
+
+        if not title or not summary:
+            self.crawler.stats.inc_value("arxiv/detail_failed", 1)
+            self.logger.error(
+                "Detail parse failed for %s due to missing title/summary. URL: %s",
+                arxiv_id,
+                response.url,
+            )
+            return
+
+        self.crawler.stats.inc_value("arxiv/detail_success", 1)
+        yield {
+            "id": arxiv_id,
+            "authors": authors,
+            "title": title,
+            "categories": categories,
+            "comment": comment,
+            "summary": summary,
+            "pdf": f"https://arxiv.org/pdf/{arxiv_id}",
+            "abs": f"https://arxiv.org/abs/{arxiv_id}",
+        }
+
+    def closed(self, reason):
+        stats = self.crawler.stats
+        list_discovered = int(stats.get_value("arxiv/list_discovered", 0) or 0)
+        detail_success = int(stats.get_value("arxiv/detail_success", 0) or 0)
+        detail_failed = int(stats.get_value("arxiv/detail_failed", 0) or 0)
+        summary = {
+            "list_discovered": list_discovered,
+            "detail_success": detail_success,
+            "detail_failed": detail_failed,
+            "close_reason": reason,
+            "log_count_error": int(stats.get_value("log_count/ERROR", 0) or 0),
+        }
+        self.logger.info(
+            "Crawl summary: list_discovered=%s detail_success=%s detail_failed=%s reason=%s",
+            list_discovered,
+            detail_success,
+            detail_failed,
+            reason,
+        )
+
+        stats_file = os.environ.get("CRAWL_STATS_FILE")
+        if stats_file:
+            with open(stats_file, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
